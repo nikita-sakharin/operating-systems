@@ -56,49 +56,73 @@ static struct
 	char pagefile_name[L_tmpnam];
 } v_mem;
 
-static VMem_void_ptr v_t_mask, b_m_mask;
-static VMem_size_t m_p_mask;
+static VMem_void_ptr mask_b_m;
+static VMem_size_t mask_m_p;
+static unsigned shift_v_t, shift_b_m;
 
-static VMem_void_ptr buffer_call(VMem_size_t);
-static void buffer_return(VMem_void_ptr, VMem_size_t);
+static void bit_map_revers(VMem_void_ptr, VMem_size_t);
+/*static */bool bit_map_check(VMem_void_ptr, VMem_size_t, bool);
 
-static VMem_size_t complement(VMem_size_t);
-static size_t divide_small(VMem_size_t);
-static size_t divide_large(VMem_size_t);
+static int page_virt_alloc(VMem_void_ptr *, size_t);
+static void page_real_alloc(VMem_void_ptr, size_t);
+static int buffer_call(VMem_void_ptr *, VMem_size_t);
+//static void buffer_return(VMem_void_ptr, VMem_size_t);
 
+static VMem_size_t buffer_size_complement(VMem_size_t);
+static VMem_size_t buffer_size_round(VMem_size_t count);
+/*
 static int page_get(size_t);
-//static int page_put(size_t);
-static size_t page_find(void);
+static int page_put(size_t);
 static Byte *page_byte_prepare(VMem_void_ptr);
-
-static VMem_void_ptr buffer_call(VMem_size_t count)//size of one of buffer or multiple page_size
+*/
+static void bit_map_revers(VMem_void_ptr ptr, VMem_size_t count)
 {
-	if (count < v_mem.page_size)
+	for (register VMem_size_t i = 0u; i < count; i += mask_m_p + 1u)
 	{
-		VMem_size_t length = count;
-		size_t i = (size_t) log2l((long double) v_mem.page_size / count);
-		for (; i < v_mem.buffer_count && list_empty(v_mem.free_buffer[i]); ++i, length *= 2u);
-		if (i >= v_mem.buffer_count)
+		register Byte *bit_map = v_mem.virt_table[(ptr + i) >> shift_v_t].bit_map;
+		register size_t idx = ((ptr + i) & mask_b_m) >> shift_b_m;
+		bit_map[idx / CHAR_BIT] ^= 1u << idx % CHAR_BIT;
+	}
+}
+
+/*static */bool bit_map_check(VMem_void_ptr ptr, VMem_size_t count, bool value)
+{
+	for (register VMem_size_t i = 0u; i < count; i += mask_m_p + 1u)
+	{
+		register Byte *bit_map = v_mem.virt_table[(ptr + i) >> shift_v_t].bit_map;
+		register size_t idx = ((ptr + i) & mask_b_m) >> shift_b_m;
+		register bool bit = bit_map[idx / CHAR_BIT] & (1u << idx % CHAR_BIT);
+		if (value)
 		{
-			for (size_t j = 0u; length > count && j < ; ++j, length /= 2u)
+			if (!bit)
 			{
-				int result_int;
-				VMem_void_ptr ptr;
-				list_front();
+				return false;
 			}
 		}
 		else
 		{
+			if (bit)
+			{
+				return false;
+			}
 		}
 	}
-	for (size_t i = 0u, j = 0u; i < v_mem.virt_count; ++i)
+
+	return true;
+}
+
+static int page_virt_alloc(VMem_void_ptr * restrict ptr_to_ptr, size_t count)
+{
+	err_handler(stack_size(v_mem.ram_page) + stack_size(v_mem.pagefile_piece) <= count, 1, err0);
+	for (register size_t i = 0u, j = 0u; i < v_mem.virt_count; ++i)
 	{
-		if (v_mem.virt_table[i].page_idx == SIZE_MAX)
+		if (v_mem.virt_table[i].page_idx == SIZE_MAX && v_mem.virt_table[i].position == (off_t) -1)
 		{
 			++j;
-			if (j == count / v_mem.page_size)
+			if (j == count)
 			{
-				
+				*ptr_to_ptr = (i - j) * v_mem.page_size;
+				return 0;
 			}
 		}
 		else
@@ -107,24 +131,87 @@ static VMem_void_ptr buffer_call(VMem_size_t count)//size of one of buffer or mu
 		}
 	}
 
-	if ()
+err0:
+	return -1;
+}
+
+static void page_real_alloc(VMem_void_ptr ptr, size_t count)
+{
+	size_t idx = ptr >> shift_v_t, i = 0u;
+	for (; i < count && !stack_empty(v_mem.ram_page); ++i)
 	{
-			
+		stack_top(v_mem.ram_page, &v_mem.virt_table[idx + i].page_idx);
+		v_mem.virt_table[idx + i].bit_presence = true;
+		stack_pop(v_mem.ram_page);
+	}
+	for (; i < count && !stack_empty(v_mem.pagefile_piece); ++i)
+	{
+		stack_top(v_mem.pagefile_piece, &v_mem.virt_table[idx + i].position);
+		stack_pop(v_mem.pagefile_piece);
 	}
 }
 
+static int buffer_call(VMem_void_ptr * restrict ptr_to_ptr, VMem_size_t count)//size of one of buffer or multiple page_size
+{
+	int result_int;
+	size_t j, i;
+	if (count < v_mem.page_size)
+	{
+		VMem_size_t length = count;
+		i = v_mem.buffer_count - (size_t) log2l((long double) v_mem.page_size / count);
+		for (; i < v_mem.buffer_count && list_empty(v_mem.free_buffer[i]); ++i, length *= 2u);
+		if (i >= v_mem.buffer_count)
+		{
+			result_int = page_virt_alloc(ptr_to_ptr, 1u);
+			err_handler(result_int, -1, err0);
+		}
+		else
+		{
+			list_front(v_mem.free_buffer[i], ptr_to_ptr);
+		}
+		for (j = i - 1u; length > count; --j, length /= 2u)
+		{
+			VMem_void_ptr temp = *ptr_to_ptr + length / 2u;
+			result_int = list_push_front(v_mem.free_buffer[j], &temp);
+			err_handler(result_int != LIST_SUCCESS, 1, err1);
+		}
+		if (i >= v_mem.buffer_count)
+		{
+			list_pop_front(v_mem.free_buffer[i]);
+			page_real_alloc(*ptr_to_ptr, 1u);
+		}
+	}
+	else
+	{
+		result_int = page_virt_alloc(ptr_to_ptr, count / v_mem.page_size);
+		err_handler(result_int, -1, err0);
+		page_real_alloc(*ptr_to_ptr, count / v_mem.page_size);
+	}
+
+	return 0;
+
+err1:
+	for (; j < i - 1u; ++j)
+	{
+		list_pop_front(v_mem.free_buffer[j + 1u]);
+	}
+
+err0:
+	return -1;
+}
+/*
 static void buffer_return(VMem_void_ptr, VMem_size_t)
 {
 }
-
-static VMem_size_t complement(VMem_size_t count)
+*/
+static VMem_size_t buffer_size_complement(VMem_size_t count)
 {
-	if (count & m_p_mask)
+	if (count & mask_m_p)
 	{
-		err_handler(count > V_MEM_SIZE_MAX - m_p_mask, 1, err0);
+		err_handler(count > V_MEM_SIZE_MAX - mask_m_p, 1, err0);
 
-		count += m_p_mask;
-		count &= ~m_p_mask;
+		count += mask_m_p;
+		count &= ~mask_m_p;
 	}
 
 	return count;
@@ -133,14 +220,24 @@ err0:
 	return V_MEM_SIZE_MAX;
 }
 
-static VMem_void_ptr divide_small(VMem_size_t count)
+static VMem_size_t buffer_size_round(VMem_size_t count)
 {
-}
+	if (count < v_mem.page_size)
+	{
+		count = (VMem_size_t) powl(2.0l, ceil(log2l((long double) count)));
+	}
+	else if (count % v_mem.page_size)
+	{
+		err_handler(count > V_MEM_SIZE_MAX - (v_mem.page_size - count % v_mem.page_size), 1, err0);
+		count += v_mem.page_size - count % v_mem.page_size;
+	}
 
-static VMem_void_ptr divide_large(VMem_size_t count)
-{
-}
+	return count;
 
+err0:
+	return V_MEM_SIZE_MAX;
+}
+/*
 static int page_get(size_t virt_idx)
 {
 	Byte *map = mmap(
@@ -165,7 +262,7 @@ static int page_get(size_t virt_idx)
 
 	return 0;
 }
-/*
+
 static int page_put(size_t virt_idx)
 {
 	Byte *map = mmap(
@@ -191,16 +288,11 @@ static int page_put(size_t virt_idx)
 err0:
 	return -1;
 }
-*/
-static size_t page_find(void)
-{
-	return 0u;
-}
 
 static Byte *page_byte_prepare(VMem_void_ptr ptr)
 {
-	VMem_void_ptr sig_bits = ptr & v_t_mask, l_s_bits = ptr & ~v_t_mask;
-	if (!v_mem.virt_table[sig_bits].bit_map[l_s_bits & b_m_mask] || ptr == V_MEM_NULL)
+	VMem_void_ptr sig_bits = ptr & mask_v_t, l_s_bits = ptr & ~mask_v_t;
+	if (!v_mem.virt_table[sig_bits].bit_map[l_s_bits & mask_b_m] || ptr == V_MEM_NULL)
 	{
 		raise(SIGSEGV);
 	}
@@ -218,7 +310,7 @@ static Byte *page_byte_prepare(VMem_void_ptr ptr)
 err0:
 	return NULL;
 }
-
+*/
 int v_mem_init(off_t pagefile_size, size_t ram_size, size_t page_size, size_t min_piece)
 {
 	err_handler(
@@ -231,15 +323,21 @@ int v_mem_init(off_t pagefile_size, size_t ram_size, size_t page_size, size_t mi
 			page_size % min_piece,
 		1, err0);
 
-	size_t log_page_size = (size_t) log2l((long double) page_size);/*piece_in_page, real_count, pagefile_size, min_piece*/
+	shift_v_t = (unsigned) log2l((long double) page_size);
+	shift_b_m = (unsigned) log2l((long double) min_piece);/*piece_in_page, real_count, pagefile_size, min_piece*/
+	mask_b_m = ~((VMem_void_ptr) 0u);
+	mask_b_m = mask_b_m >> shift_b_m;
+	mask_b_m = mask_b_m << (shift_b_m + COMPUTER_ARCHITECTURE - shift_v_t);
+	mask_b_m = mask_b_m >> (COMPUTER_ARCHITECTURE - shift_v_t);
+	mask_m_p = min_piece - 1u;
 
 	v_mem.pagefile_size = pagefile_size - pagefile_size % page_size;
 	v_mem.min_piece = min_piece;
 	v_mem.page_size = page_size;
 	v_mem.piece_in_page = v_mem.page_size / v_mem.min_piece;
-	v_mem.buffer_count = (size_t) log2l((long double) page_size / min_piece);
+	v_mem.buffer_count = shift_v_t - shift_b_m;
 	v_mem.real_count = ram_size / v_mem.page_size;
-	v_mem.virt_count = 1ull << (COMPUTER_ARCHITECTURE - log_page_size);
+	v_mem.virt_count = 1ull << (COMPUTER_ARCHITECTURE - shift_v_t);
 	v_mem.ram = malloc(v_mem.real_count * v_mem.page_size);
 	err_handler(v_mem.ram, NULL, err0);
 
@@ -254,7 +352,6 @@ int v_mem_init(off_t pagefile_size, size_t ram_size, size_t page_size, size_t mi
 		v_mem.virt_table[i].bit_map = calloc((v_mem.piece_in_page + CHAR_BIT - 1u) / CHAR_BIT, sizeof(Byte));
 		err_handler(v_mem.virt_table, NULL, err2);
 	}
-	v_mem.virt_table[0u].bit_map[0u] = 0x01u;
 
 	int result_int;
 	result_int = stack_create(&v_mem.ram_page, sizeof(size_t));
@@ -292,11 +389,6 @@ int v_mem_init(off_t pagefile_size, size_t ram_size, size_t page_size, size_t mi
 	err_handler(v_mem.pagefile_descript, -1, err6);
 	result_int = ftruncate(v_mem.pagefile_descript, v_mem.pagefile_size);
 	err_handler(result_int, -1, err7);
-
-	v_t_mask = 0u;
-	v_t_mask = ~v_t_mask >> log_page_size << log_page_size;
-	b_m_mask = ~(v_t_mask | (min_piece - 1u));
-	m_p_mask = min_piece - 1u;
 
 	return 0;
 
@@ -367,26 +459,24 @@ int v_mem_deinit(void)
 
 VMem_void_ptr v_mem_alloc(VMem_size_t count)
 {
-	count = complement(count);
-	err_handler(!count || count == SIZE_MAX, 1, err0);
+	int result_int;
+
+	count = buffer_size_complement(count);
+	err_handler(!count || count == V_MEM_SIZE_MAX, 1, err0);
+	VMem_size_t align_count = buffer_size_round(count);
+	err_handler(align_count, V_MEM_SIZE_MAX, err0);
 
 	VMem_void_ptr ptr;
-	if (count <= v_mem.page_size)
-	{
-		ptr = divide_small(count);
-	}
-	else
-	{
-		ptr = divide_large(count);
-	}
-	err_handler(ptr, V_MEM_NULL, err0);
+	result_int = buffer_call(&ptr, align_count);
+	err_handler(result_int, -1, err0);
+	bit_map_revers(ptr, count);
 
-	return ptr;
+	return ptr + mask_m_p + 1u;
 
 err0:
 	return V_MEM_NULL;
 }
-
+/*
 void v_mem_free(VMem_void_ptr, VMem_size_t)
 {
 }
@@ -416,3 +506,4 @@ int v_mem_deref_r(VMem_void_ptr ptr, Byte *value)
 
 	return 0;
 }
+*/

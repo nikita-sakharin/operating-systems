@@ -16,10 +16,12 @@
 int main(void)
 {
 	int result;
-	result = v_mem_init(65536, 32768u, 1024u, 32u);
-	err_handler(result, -1, "v_mem_init");
+	result = v_mem_init(32768, 32768u, 1024u, 32u);
+	err_handler(result, -1, "v_mem_init()");
+	VMem_void_ptr ptr = v_mem_alloc(5);
+	err_handler(ptr, V_MEM_NULL, "v_mem_alloc()");
 	result = v_mem_deinit();
-	err_handler(result, -1, "v_mem_deinit");
+	err_handler(result, -1, "v_mem_deinit()");
 
 	return 0;
 }
