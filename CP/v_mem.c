@@ -15,7 +15,7 @@
 
 #include "./list/list.h"
 #include "./stack/stack.h"
-#include "./queue/queue.h"
+#include "./list/list.h"
 
 #include "v_mem.h"
 
@@ -30,10 +30,10 @@ typedef struct
 	off_t position;
 	Byte *bit_map;
 	size_t page_idx;
-	bool bit_presence;
+	bool bit_presence : 1;
+	bool is_read : 1;
+	bool is_write : 1;
 } VirtPageTable;
-
-#define V_MEM_NULL ((VMem_void_ptr) 0)
 
 #define P_SIZE sysconf(_SC_PAGE_SIZE)
 
@@ -42,10 +42,10 @@ static struct
 	off_t pagefile_size;
 	Byte *ram;
 	VirtPageTable *virt_table;
-	List **free_buffer;
-	Stack *pagefile_piece;
 	Stack *ram_page;
-	Queue *page_replacement;
+	Stack *pagefile_piece;
+	List **free_buffer;
+	List *page_replacement;
 	size_t min_piece;
 	size_t page_size;
 	size_t piece_in_page;
@@ -61,15 +61,15 @@ static VMem_size_t mask_m_p;
 static unsigned shift_v_t, shift_b_m;
 
 static void bit_map_revers(VMem_void_ptr, VMem_size_t);
-/*static */bool bit_map_check(VMem_void_ptr, VMem_size_t, bool);
+static bool bit_map_check(VMem_void_ptr, VMem_size_t, bool);
+
+static VMem_size_t buffer_size_complement(VMem_size_t);
+static VMem_size_t buffer_size_round(VMem_size_t count);
 
 static int page_virt_alloc(VMem_void_ptr *, size_t);
 static void page_real_alloc(VMem_void_ptr, size_t);
 static int buffer_call(VMem_void_ptr *, VMem_size_t);
-//static void buffer_return(VMem_void_ptr, VMem_size_t);
-
-static VMem_size_t buffer_size_complement(VMem_size_t);
-static VMem_size_t buffer_size_round(VMem_size_t count);
+static void buffer_return(VMem_void_ptr, VMem_size_t);
 /*
 static int page_get(size_t);
 static int page_put(size_t);
@@ -85,7 +85,7 @@ static void bit_map_revers(VMem_void_ptr ptr, VMem_size_t count)
 	}
 }
 
-/*static */bool bit_map_check(VMem_void_ptr ptr, VMem_size_t count, bool value)
+static bool bit_map_check(VMem_void_ptr ptr, VMem_size_t count, bool value)
 {
 	for (register VMem_size_t i = 0u; i < count; i += mask_m_p + 1u)
 	{
@@ -111,7 +111,41 @@ static void bit_map_revers(VMem_void_ptr ptr, VMem_size_t count)
 	return true;
 }
 
-static int page_virt_alloc(VMem_void_ptr * restrict ptr_to_ptr, size_t count)
+static VMem_size_t buffer_size_complement(VMem_size_t count)
+{
+	if (count & mask_m_p)
+	{
+		err_handler(count > V_MEM_SIZE_MAX - mask_m_p, 1, err0);
+
+		count += mask_m_p;
+		count &= ~mask_m_p;
+	}
+
+	return count;
+
+err0:
+	return V_MEM_SIZE_MAX;
+}
+
+static VMem_size_t buffer_size_round(VMem_size_t count)
+{
+	if (count < v_mem.page_size)
+	{
+		count = (VMem_size_t) powl(2.0l, ceill(log2l((long double) count)));
+	}
+	else if (count % v_mem.page_size)
+	{
+		err_handler(count > V_MEM_SIZE_MAX - (v_mem.page_size - count % v_mem.page_size), 1, err0);
+		count += v_mem.page_size - count % v_mem.page_size;
+	}
+
+	return count;
+
+err0:
+	return V_MEM_SIZE_MAX;
+}
+
+static int page_virt_alloc(VMem_void_ptr * restrict ptr_to_ptr, size_t count)//найти страницы у которых есть и ram и pagefile
 {
 	err_handler(stack_size(v_mem.ram_page) + stack_size(v_mem.pagefile_piece) <= count, 1, err0);
 	for (register size_t i = 0u, j = 0u; i < v_mem.virt_count; ++i)
@@ -121,7 +155,7 @@ static int page_virt_alloc(VMem_void_ptr * restrict ptr_to_ptr, size_t count)
 			++j;
 			if (j == count)
 			{
-				*ptr_to_ptr = (i - j) * v_mem.page_size;
+				*ptr_to_ptr = (i + 1u - j) * v_mem.page_size;
 				return 0;
 			}
 		}
@@ -151,7 +185,7 @@ static void page_real_alloc(VMem_void_ptr ptr, size_t count)
 	}
 }
 
-static int buffer_call(VMem_void_ptr * restrict ptr_to_ptr, VMem_size_t count)//size of one of buffer or multiple page_size
+static int buffer_call(VMem_void_ptr * restrict ptr_to_ptr, VMem_size_t count)
 {
 	int result_int;
 	size_t j, i;
@@ -177,65 +211,118 @@ static int buffer_call(VMem_void_ptr * restrict ptr_to_ptr, VMem_size_t count)//
 		}
 		if (i >= v_mem.buffer_count)
 		{
-			list_pop_front(v_mem.free_buffer[i]);
+			size_t idx = *ptr_to_ptr >> shift_v_t;
+			result_int = list_push_back(v_mem.page_replacement, &idx);
+			err_handler(result_int != LIST_SUCCESS, 1, err1);
 			page_real_alloc(*ptr_to_ptr, 1u);
+		}
+		else
+		{
+			list_pop_front(v_mem.free_buffer[i]);
 		}
 	}
 	else
 	{
 		result_int = page_virt_alloc(ptr_to_ptr, count / v_mem.page_size);
 		err_handler(result_int, -1, err0);
+
+		for (i = 0u; i < count / v_mem.page_size; ++i)
+		{
+			size_t idx = i + (*ptr_to_ptr >> shift_v_t);
+			result_int = list_push_back(v_mem.page_replacement, &idx);
+			err_handler(result_int != LIST_SUCCESS, 1, err2);
+		}
 		page_real_alloc(*ptr_to_ptr, count / v_mem.page_size);
 	}
 
 	return 0;
 
-err1:
-	for (; j < i - 1u; ++j)
+err2:
+	for (; i > 0; --i)
 	{
-		list_pop_front(v_mem.free_buffer[j + 1u]);
+		list_pop_back(v_mem.page_replacement);
+	}
+
+	return -1;
+
+err1:
+	for (++j; j < i; ++j)
+	{
+		list_pop_front(v_mem.free_buffer[j]);
 	}
 
 err0:
 	return -1;
 }
-/*
-static void buffer_return(VMem_void_ptr, VMem_size_t)
-{
-}
-*/
-static VMem_size_t buffer_size_complement(VMem_size_t count)
-{
-	if (count & mask_m_p)
-	{
-		err_handler(count > V_MEM_SIZE_MAX - mask_m_p, 1, err0);
 
-		count += mask_m_p;
-		count &= ~mask_m_p;
+static void buffer_return(VMem_void_ptr ptr, VMem_size_t size)
+{
+	int result_int;
+
+	for (bool is_free = true; size < v_mem.page_size && is_free; size *= 2u)
+	{
+		VMem_void_ptr buddy = ptr;
+		if (ptr / size % 2u)
+		{
+			buddy -= size;
+		}
+		else
+		{
+			buddy += size;
+		}
+
+		is_free = bit_map_check(buddy, size, false);
+		List *list = v_mem.free_buffer[(size_t) log2l((long double) size) - shift_b_m];
+		if (is_free)
+		{
+			ListIt it = list_it_begin(list), end = list_it_end(list);
+			for (; list_it_inequal(&it, &end) && *(VMem_void_ptr *) list_it_data(&it) != buddy; list_it_next(&it));
+			bool is_present = list_it_inequal(&it, &end);
+			err_handler(is_present, false, err0);
+			list_it_erase(&it);
+			if (ptr > buddy)
+			{
+				ptr -= size;
+			}
+		}
+		else
+		{
+			list_push_front(list, &ptr);
+			break;
+		}
 	}
 
-	return count;
+	for (register VMem_size_t i = 0u; i + v_mem.page_size <= size; i += v_mem.page_size)
+	{
+		size_t idx = (ptr + i) >> shift_v_t;
+		register VirtPageTable *cell = v_mem.virt_table + idx;
+		if (cell->position != (off_t) -1)
+		{
+			result_int = stack_push(v_mem.pagefile_piece, &cell->position);
+			err_handler(result_int != STACK_SUCCESS, 1, err0);
+			cell->position = (off_t) -1;
+		}
+		if (cell->page_idx != SIZE_MAX)
+		{
+			result_int = stack_push(v_mem.ram_page, &cell->page_idx);
+			err_handler(result_int != STACK_SUCCESS, 1, err0);
+			cell->page_idx = SIZE_MAX;
+		}
+		cell->bit_presence = false;
+		cell->is_read = false;
+		cell->is_write = false;
+
+		ListIt it = list_it_begin(v_mem.page_replacement), end = list_it_end(v_mem.page_replacement);
+		for (; list_it_inequal(&it, &end) && *(size_t *) list_it_data(&it) != idx; list_it_next(&it));
+		bool is_present = list_it_inequal(&it, &end);
+		err_handler(is_present, false, err0);
+		list_it_erase(&it);
+	}
+
+	return;
 
 err0:
-	return V_MEM_SIZE_MAX;
-}
-
-static VMem_size_t buffer_size_round(VMem_size_t count)
-{
-	if (count < v_mem.page_size)
-	{
-		count = (VMem_size_t) powl(2.0l, ceil(log2l((long double) count)));
-	}
-	else if (count % v_mem.page_size)
-	{
-		err_handler(count > V_MEM_SIZE_MAX - (v_mem.page_size - count % v_mem.page_size), 1, err0);
-		count += v_mem.page_size - count % v_mem.page_size;
-	}
-
-	return count;
-
-err0:
-	return V_MEM_SIZE_MAX;
+	raise(SIGSEGV);
 }
 /*
 static int page_get(size_t virt_idx)
@@ -349,6 +436,8 @@ int v_mem_init(off_t pagefile_size, size_t ram_size, size_t page_size, size_t mi
 		v_mem.virt_table[i].position = (off_t) -1;
 		v_mem.virt_table[i].page_idx = SIZE_MAX;
 		v_mem.virt_table[i].bit_presence = false;
+		v_mem.virt_table[i].is_read = false;
+		v_mem.virt_table[i].is_write = false;
 		v_mem.virt_table[i].bit_map = calloc((v_mem.piece_in_page + CHAR_BIT - 1u) / CHAR_BIT, sizeof(Byte));
 		err_handler(v_mem.virt_table, NULL, err2);
 	}
@@ -369,8 +458,8 @@ int v_mem_init(off_t pagefile_size, size_t ram_size, size_t page_size, size_t mi
 		result_int = list_create(v_mem.free_buffer + j, sizeof(VMem_void_ptr));
 		err_handler(result_int != LIST_SUCCESS, 1, err4);
 	}
-	result_int = queue_create(&v_mem.page_replacement, sizeof(size_t));
-	err_handler(result_int != QUEUE_SUCCESS, 1, err4);
+	result_int = list_create(&v_mem.page_replacement, sizeof(size_t));
+	err_handler(result_int != LIST_SUCCESS, 1, err4);
 
 	result_int = stack_create(&v_mem.pagefile_piece, sizeof(off_t));
 	err_handler(result_int != STACK_SUCCESS, 1, err5);
@@ -398,7 +487,7 @@ err7:
 err6:
 	stack_destroy(v_mem.pagefile_piece);
 err5:
-	queue_destroy(v_mem.page_replacement);
+	list_destroy(v_mem.page_replacement);
 err4:
 	for (; j > 0u; --j)
 	{
@@ -439,7 +528,7 @@ int v_mem_deinit(void)
 	}
 	free(v_mem.free_buffer);
 
-	queue_destroy(v_mem.page_replacement);
+	list_destroy(v_mem.page_replacement);
 
 	stack_destroy(v_mem.pagefile_piece);
 
@@ -471,16 +560,63 @@ VMem_void_ptr v_mem_alloc(VMem_size_t count)
 	err_handler(result_int, -1, err0);
 	bit_map_revers(ptr, count);
 
+	VMem_size_t diff = align_count - count;
+	VMem_void_ptr end = ptr + align_count;
+	if (diff)
+	{
+		for (register size_t i = shift_v_t; i > shift_b_m; --i)
+		{
+			register VMem_size_t mask = ((VMem_size_t) 1u << (i - 1u));
+			if (diff & mask)
+			{
+				end -= mask;
+				result_int = list_push_front(v_mem.free_buffer[i - 1u - shift_b_m], &end);
+				err_handler(result_int != LIST_SUCCESS, 1, err1);
+			}
+		}
+	}
+
 	return ptr + mask_m_p + 1u;
 
+err1:
+	raise(SIGSEGV);
 err0:
 	return V_MEM_NULL;
 }
-/*
-void v_mem_free(VMem_void_ptr, VMem_size_t)
-{
-}
 
+void v_mem_free(VMem_void_ptr ptr, VMem_size_t count)
+{
+	count = buffer_size_complement(count);
+	err_handler(!count || count == V_MEM_SIZE_MAX, 1, err0);
+
+	ptr -= mask_m_p + 1u;
+
+	bool is_correct = bit_map_check(ptr, count, true);
+	err_handler(is_correct, false, err0);
+
+	bit_map_revers(ptr, count);
+
+	if ((count & ~mask_b_m) != count)
+	{
+		for (size_t i = shift_b_m; i < shift_v_t; ++i)
+		{
+			VMem_size_t mask = (VMem_size_t) 1u << i;
+			if (count & mask)
+			{
+				count -= mask;
+				buffer_return(ptr + count, mask);
+			}
+		}
+	}
+
+	buffer_return(ptr, count);
+
+	return;
+
+err0:
+	raise(SIGSEGV);
+}
+/*
 int v_mem_deref_l(VMem_void_ptr ptr, Byte *value)
 {
 	Byte *result = page_byte_prepare(ptr);

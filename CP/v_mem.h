@@ -34,6 +34,7 @@ typedef int_least64_t VMem_ptrdiff_t;
 static_assert(0, "COMPUTER_ARCHITECTURE = "str_make(COMPUTER_ARCHITECTURE)" is invalid");
 #endif
 typedef VMem_size_t VMem_void_ptr;
+#define V_MEM_NULL ((VMem_void_ptr) 0)
 
 typedef uint_least8_t Byte;
 
@@ -41,7 +42,7 @@ int v_mem_init(off_t, size_t, size_t, size_t);
 int v_mem_deinit(void);
 
 VMem_void_ptr v_mem_alloc(VMem_size_t);
-void v_mem_free(VMem_void_ptr);
+void v_mem_free(VMem_void_ptr, VMem_size_t);
 
 int v_mem_deref_l(VMem_void_ptr, Byte *);
 int v_mem_deref_r(VMem_void_ptr, Byte *);
