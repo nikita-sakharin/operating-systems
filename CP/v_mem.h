@@ -44,7 +44,7 @@ int v_mem_deinit(void);
 VMem_void_ptr v_mem_alloc(VMem_size_t);
 void v_mem_free(VMem_void_ptr, VMem_size_t);
 
-int v_mem_deref_l(VMem_void_ptr, Byte *);
-int v_mem_deref_r(VMem_void_ptr, Byte *);
+void v_mem_deref_l(VMem_void_ptr, Byte);
+Byte v_mem_deref_r(VMem_void_ptr);
 
 #endif
