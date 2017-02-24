@@ -407,7 +407,7 @@ static Byte *page_byte_prepare(VMem_void_ptr ptr, bool rd_wr)
 	}
 	v_mem.virt_table[virt_idx].is_read = true;
 
-	return v_mem.ram + v_mem.virt_table[virt_idx].page_idx + idx_in_page;
+	return v_mem.ram + v_mem.virt_table[virt_idx].page_idx * v_mem.page_size + idx_in_page;
 
 err0:
 	raise(SIGSEGV);
@@ -734,7 +734,10 @@ void v_mem_free(VMem_void_ptr ptr, VMem_size_t count)
 		}
 	}
 
-	buffer_return(ptr, count);
+	if (count)
+	{
+		buffer_return(ptr, count);
+	}
 
 	return;
 
