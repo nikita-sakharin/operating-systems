@@ -1,3 +1,4 @@
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,10 +20,16 @@
 		break;\
 	}
 
+void handler(int);
+
 void menu_print(void);
 
 int main(void)
 {
+	void (*func)(int);
+	func = signal(SIGSEGV, handler);
+	err_handler(func, SIG_ERR, "signal()");
+
 	int result;
 
 	result = v_mem_init(1024, 2048u, 1024u, 32u);
@@ -119,6 +126,52 @@ int main(void)
 	err_handler(result, -1, "v_mem_deinit()");
 
 	return 0;
+}
+
+void handler(int sig)
+{
+	printf("Signal ");
+	const char *descript;
+	switch (sig)
+	{
+		case SIGABRT:
+		{
+			descript = "SIGABRT";
+			break;
+		}
+		case SIGFPE:
+		{
+			descript = "SIGFPE";
+			break;
+		}
+		case SIGILL:
+		{
+			descript = "SIGILL";
+			break;
+		}
+		case SIGINT:
+		{
+			descript = "SIGINT";
+			break;
+		}
+		case SIGSEGV:
+		{
+			descript = "SIGSEGV";
+			break;
+		}
+		case SIGTERM:
+		{
+			descript = "SIGTERM";
+			break;
+		}
+		default:
+		{
+			descript = "some other implementation-defined signal";
+			break;
+		}
+	}
+	printf("%s has been occurs by the call to the raise() function\n", descript);
+	exit(EXIT_FAILURE);
 }
 
 void menu_print(void)
