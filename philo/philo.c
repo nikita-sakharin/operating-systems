@@ -1,5 +1,4 @@
 #include <assert.h> // assert
-#include <limits.h> // ULLONG_MAX
 #include <stdbool.h> // bool, false, true
 #include <stddef.h> // size_t
 #include <stdio.h> // printf
@@ -71,14 +70,18 @@ bool testIsValid(const uint timeToDie, Arg * const restrict arg) {
     EXIT_IF(pthread_mutex_lock(arg->shared) != 0, "pthread_mutex_lock");
     const ullong now = getMilliTime();
     const size_t size = arg->size;
-    for (size_t i = 0; i < size; ++i)
-        if (now - timeToDie >= arg[i].lastMeal) {
+    bool mustEat = false;
+    for (size_t i = 0; i < size && !*arg->isDied; ++i) {
+        if (arg[i].mustEat == 0)
+            continue;
+        mustEat = true;
+        if (now - arg[i].lastMeal >= timeToDie) {
             *arg->isDied = true;
             printf(FORMAT, now - arg->start, arg[i].rank + 1, msgToStr(DIED));
-            break;
         }
+    }
     EXIT_IF(pthread_mutex_unlock(arg->shared) != 0, "pthread_mutex_unlock");
-    return !*arg->isDied;
+    return !*arg->isDied && mustEat;
 }
 
 static bool testRefreshPrint(Arg * const restrict arg, const Message msg) {
@@ -90,10 +93,8 @@ static bool testRefreshPrint(Arg * const restrict arg, const Message msg) {
             arg->lastMeal = now;
             if (arg->mustEat != -1)
                 --arg->mustEat;
-            if (arg->mustEat == 0) {
-                arg->lastMeal = ULLONG_MAX;
+            if (arg->mustEat == 0)
                 isValid = false;
-            }
         }
         printf(FORMAT, now - arg->start, arg->rank + 1, msgToStr(msg));
     }
