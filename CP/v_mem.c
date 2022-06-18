@@ -15,7 +15,6 @@
 
 #include "./list/list.h"
 #include "./stack/stack.h"
-#include "./list/list.h"
 
 #include "v_mem.h"
 
